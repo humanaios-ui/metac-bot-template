@@ -1,14 +1,64 @@
+"""
+HumanAIOS Forecasting Bot — main.py
+=====================================
+Drop-in replacement for metac-bot-template/main.py
+
+Registry: HumanAIOS LLC · FDS: F3-Component · Parent: ACAT_CORE_CONSTRUCT_F1_SEED_V1_0
+OR&D purpose: Behavioral calibration data — each forecast is one paired data point
+  (self-reported ACAT dimensions + externally-scored Brier outcome).
+  Targets hypotheses H34/H35 (Calibration Transfer Function — does ACAT LI predict
+  forecasting accuracy?) and H51 (Epistemic Humility Audit).
+
+Primary model: Claude Sonnet 4.5 (current generally-available Sonnet at time of build;
+  update model string if a newer Sonnet is preferred. See litellm model docs.)
+
+HOW TO DEPLOY (Zone 3 — Night executes, ~20 min):
+  1. Fork  https://github.com/Metaculus/metac-bot-template  →  humanaios-ui org
+  2. In your fork: click main.py → Edit → paste this entire file → Commit
+  3. Settings → Secrets and variables → Actions → New repository secret. Add:
+       METACULUS_TOKEN     (from metaculus.com/aib → Settings → API)
+       ANTHROPIC_API_KEY   (from console.anthropic.com)
+       OPENROUTER_API_KEY  (optional: only if using OpenRouter fallback)
+       ASKNEWS_CLIENT_ID   (optional: better research; free via tournament)
+       ASKNEWS_SECRET      (optional: pair with ASKNEWS_CLIENT_ID)
+  4. Actions → Enable workflows → open "Forecast on new AI tournament questions"
+     → click "Run workflow" once to confirm it executes without error
+  5. Leave running. Bot runs every 20 min automatically via GitHub Actions cron.
+  6. Verify: go to your bot account on metaculus.com → you should see brown dots
+     appearing on open tournament questions within ~20 min of first run.
+
+ACAT MODIFICATION:
+  The only substantive change from the official Spring 2026 template is the
+  binary forecast prompt. An explicit "Calibration principles" block is prepended
+  before the standard (a-d) scenario analysis. This block names the behavior
+  under measurement — weight status quo, stay near 50% under genuine uncertainty,
+  treat 90%+/10%- as surprise thresholds. This targets the Humility and
+  Truthfulness dimensions that ACAT measures (where our dataset shows Humility
+  = lowest mean across providers, Phase 1 n=516, under clean unanchored
+  conditions v5.3+). All other question types inherit unchanged from the
+  template — clean baseline on non-binary behavior.
+
+PROVENANCE:
+  Base template: github.com/Metaculus/metac-bot-template @ main (fetched Apr 22 2026)
+  Original class: SpringTemplateBot2026
+  Our class:      HumanAIOSBot (inherits; only _run_forecast_on_binary differs)
+"""
+
 import argparse
 import asyncio
 import logging
 from datetime import datetime, timezone
-import dotenv
 from typing import Literal
 
-
+import dotenv
 from forecasting_tools import (
     AskNewsSearcher,
+    BinaryPrediction,
     BinaryQuestion,
+    ConditionalPrediction,
+    ConditionalQuestion,
+    DatePercentile,
+    DateQuestion,
     ForecastBot,
     GeneralLlm,
     MetaculusClient,
@@ -16,15 +66,10 @@ from forecasting_tools import (
     MultipleChoiceQuestion,
     NumericDistribution,
     NumericQuestion,
-    DateQuestion,
-    DatePercentile,
     Percentile,
-    ConditionalQuestion,
-    ConditionalPrediction,
-    PredictionTypes,
-    PredictionAffirmed,
-    BinaryPrediction,
     PredictedOptionList,
+    PredictionAffirmed,
+    PredictionTypes,
     ReasonedPrediction,
     SmartSearcher,
     clean_indents,
@@ -35,102 +80,32 @@ dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 
-class SpringTemplateBot2026(ForecastBot):
+class HumanAIOSBot(ForecastBot):
     """
-    This is the template bot for Spring 2026 Metaculus AI Tournament.
-    This is a copy of what is used by Metaculus to run the Metac Bots in our benchmark, provided as a template for new bot makers.
-    This template is given as-is, and is use-at-your-own-risk.
-    We have covered most test cases in forecasting-tools it may be worth double checking key components locally.
-    So far our track record has been 1 mentionable bug per season (affecting forecasts for 1-2% of total questions)
+    HumanAIOS forecasting bot for Metaculus FutureEval MiniBench + Summer 2026.
 
-    Main changes since Fall:
-    - Additional prompting has been added to numeric questions to emphasize putting pecentile values in the correct order.
-    - Support for conditional and date questions has been added
-    - Note: Spring AIB will not use date/conditional questions, so these are only for forecasting on the main site as you wish.
-
-    The main entry point of this bot is `bot.forecast_on_tournament(tournament_id)` in the parent class.
-    See the script at the bottom of the file for more details on how to run the bot.
-    Ignoring the finer details, the general flow is:
-    - Load questions from Metaculus
-    - For each question
-        - Execute run_research a number of times equal to research_reports_per_question
-        - Execute respective run_forecast function `predictions_per_research_report * research_reports_per_question` times
-        - Aggregate the predictions
-        - Submit prediction (if publish_reports_to_metaculus is True)
-    - Return a list of ForecastReport objects
-
-    Alternatively, you can use the MetaculusClient to make a custom filter of questions to forecast on
-    and forecast them with `bot.forecast_questions(questions)`
-
-    Only the research and forecast functions need to be implemented in ForecastBot subclasses,
-    though you may want to override other ForecastBot functions.
-    In this example, you can change the prompts to be whatever you want since,
-    structure_output uses an LLM to intelligently reformat the output into the needed structure.
-
-    By default (i.e. 'tournament' mode), when you run this script, it will forecast on any open questions in the
-    primary bot tournament and MiniBench. If you want to forecast on only one or the other, you can remove one
-    of them from the 'tournament' mode code at the bottom of the file.
-
-    You can experiment with what models work best with your bot by using the `llms` parameter when initializing the bot.
-    You can initialize the bot with any number of models. For example,
-    ```python
-    my_bot = MyBot(
-        ...
-        llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
-            "default": GeneralLlm(
-                model="openrouter/openai/gpt-4o", # "anthropic/claude-sonnet-4-20250514", etc (see docs for litellm)
-                temperature=0.3,
-                timeout=40,
-                allowed_tries=2,
-            ),
-            "summarizer": "openai/gpt-4o-mini",
-            "researcher": "asknews/news-summaries",
-            "parser": "openai/gpt-4o-mini",
-        },
-    )
-    ```
-
-    Then you can access the model in custom functions like this:
-    ```python
-    research_strategy = self.get_llm("researcher", "model_name"
-    if research_strategy == "asknews/news-summaries":
-        ...
-    # OR
-    summarizer = await self.get_llm("summarizer", "llm").invoke(prompt)
-    # OR
-    reasoning = await self.get_llm("default", "llm").invoke(prompt)
-    ```
-
-    If you end up having trouble with rate limits and want to try a more sophisticated rate limiter try:
-    ```python
-    from forecasting_tools import RefreshingBucketRateLimiter
-    rate_limiter = RefreshingBucketRateLimiter(
-        capacity=2,
-        refresh_rate=1,
-    ) # Allows 1 request per second on average with a burst of 2 requests initially. Set this as a class variable
-    await self.rate_limiter.wait_till_able_to_acquire_resources(1) # 1 because it's consuming 1 request (use more if you are adding a token limit)
-    ```
-    Additionally OpenRouter has large rate limits immediately on account creation
+    Inherits all research and non-binary question handling from the Spring 2026
+    template. Only _run_forecast_on_binary is modified to include explicit
+    calibration framing. See module docstring for research rationale.
     """
 
-    _max_concurrent_questions = (
-        1  # Set this to whatever works for your search-provider/ai-model rate limits
-    )
+    _max_concurrent_questions = 1
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
 
-    ##################################### RESEARCH #####################################
+    ################################## RESEARCH ##################################
 
     async def run_research(self, question: MetaculusQuestion) -> str:
         async with self._concurrency_limiter:
             research = ""
             researcher = self.get_llm("researcher")
-
             prompt = clean_indents(
                 f"""
                 You are an assistant to a superforecaster.
                 The superforecaster will give you a question they intend to forecast on.
-                To be a great assistant, you generate a concise but detailed rundown of the most relevant news, including if the question would resolve Yes or No based on current information.
+                To be a great assistant, you generate a concise but detailed rundown
+                of the most relevant news, including if the question would resolve
+                Yes or No based on current information.
                 You do not produce forecasts yourself.
 
                 Question:
@@ -168,17 +143,29 @@ class SpringTemplateBot2026(ForecastBot):
                 research = ""
             else:
                 research = await self.get_llm("researcher", "llm").invoke(prompt)
+
             logger.info(f"Found Research for URL {question.page_url}:\n{research}")
             return research
 
-    ##################################### BINARY QUESTIONS #####################################
+    ############################## BINARY QUESTIONS ##############################
+    # ACAT modification zone. All other question types are unchanged below.
+    # The calibration block targets Humility (avoid overconfidence) and
+    # Truthfulness (accurate uncertainty expression).
 
     async def _run_forecast_on_binary(
         self, question: BinaryQuestion, research: str
     ) -> ReasonedPrediction[float]:
         prompt = clean_indents(
             f"""
-            You are a professional forecaster interviewing for a job.
+            You are a calibrated forecaster. Your goal is accuracy about uncertainty,
+            not the appearance of confidence.
+
+            Calibration principles (apply these before answering):
+            - Weight the status quo heavily. The world changes slowly most of the time.
+            - If genuinely uncertain, stay near 50%. Do not fabricate confidence.
+            - A forecast of 90%+ means you would be surprised if it resolved No.
+            - A forecast of 10% or less means you would be surprised if it resolved Yes.
+            - Your final number should match how surprised you would actually be.
 
             Your interview question is:
             {question.question_text}
@@ -186,12 +173,11 @@ class SpringTemplateBot2026(ForecastBot):
             Question background:
             {question.background_info}
 
-
-            This question's outcome will be determined by the specific criteria below. These criteria have not yet been satisfied:
+            This question's outcome will be determined by the specific criteria below.
+            These criteria have not yet been satisfied:
             {question.resolution_criteria}
 
             {question.fine_print}
-
 
             Your research assistant says:
             {research}
@@ -204,13 +190,15 @@ class SpringTemplateBot2026(ForecastBot):
             (c) A brief description of a scenario that results in a No outcome.
             (d) A brief description of a scenario that results in a Yes outcome.
 
-            You write your rationale remembering that good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time.
+            You write your rationale remembering that good forecasters put extra
+            weight on the status quo outcome since the world changes slowly most
+            of the time.
+
             {self._get_conditional_disclaimer_if_necessary(question)}
 
             The last thing you write is your final answer as: "Probability: ZZ%", 0-100
             """
         )
-
         return await self._binary_prompt_to_forecast(question, prompt)
 
     async def _binary_prompt_to_forecast(
@@ -227,13 +215,13 @@ class SpringTemplateBot2026(ForecastBot):
             num_validation_samples=self._structure_output_validation_samples,
         )
         decimal_pred = max(0.01, min(0.99, binary_prediction.prediction_in_decimal))
-
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {decimal_pred}."
         )
         return ReasonedPrediction(prediction_value=decimal_pred, reasoning=reasoning)
 
-    ##################################### MULTIPLE CHOICE QUESTIONS #####################################
+    ########################## MULTIPLE CHOICE QUESTIONS #########################
+    # Unchanged from template — clean baseline.
 
     async def _run_forecast_on_multiple_choice(
         self, question: MultipleChoiceQuestion, research: str
@@ -247,14 +235,12 @@ class SpringTemplateBot2026(ForecastBot):
 
             The options are: {question.options}
 
-
             Background:
             {question.background_info}
 
             {question.resolution_criteria}
 
             {question.fine_print}
-
 
             Your research assistant says:
             {research}
@@ -264,9 +250,10 @@ class SpringTemplateBot2026(ForecastBot):
             Before answering you write:
             (a) The time left until the outcome to the question is known.
             (b) The status quo outcome if nothing changed.
-            (c) A description of an scenario that results in an unexpected outcome.
+            (c) A description of a scenario that results in an unexpected outcome.
 
             {self._get_conditional_disclaimer_if_necessary(question)}
+
             You write your rationale remembering that (1) good forecasters put extra weight on the status quo outcome since the world changes slowly most of the time, and (2) good forecasters leave some moderate probability on most options to account for unexpected outcomes.
 
             The last thing you write is your final probabilities for the N options in this order {question.options} as:
@@ -287,7 +274,6 @@ class SpringTemplateBot2026(ForecastBot):
             f"""
             Make sure that all option names are one of the following:
             {question.options}
-
             The text you are parsing may prepend these options with some variation of "Option" which you should remove if not part of the option names I just gave you.
             Additionally, you may sometimes need to parse a 0% probability. Please do not skip options with 0% but rather make it an entry in your final list with 0% probability.
             """
@@ -301,7 +287,6 @@ class SpringTemplateBot2026(ForecastBot):
             num_validation_samples=self._structure_output_validation_samples,
             additional_instructions=parsing_instructions,
         )
-
         logger.info(
             f"Forecasted URL {question.page_url} with prediction: {predicted_option_list}."
         )
@@ -309,7 +294,8 @@ class SpringTemplateBot2026(ForecastBot):
             prediction_value=predicted_option_list, reasoning=reasoning
         )
 
-    ##################################### NUMERIC QUESTIONS #####################################
+    ############################## NUMERIC QUESTIONS #############################
+    # Unchanged from template.
 
     async def _run_forecast_on_numeric(
         self, question: NumericQuestion, research: str
@@ -355,6 +341,7 @@ class SpringTemplateBot2026(ForecastBot):
             (f) A brief description of an unexpected scenario that results in a high outcome.
 
             {self._get_conditional_disclaimer_if_necessary(question)}
+
             You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
 
             The last thing you write is your final answer as:
@@ -403,7 +390,8 @@ class SpringTemplateBot2026(ForecastBot):
         )
         return ReasonedPrediction(prediction_value=prediction, reasoning=reasoning)
 
-    ##################################### DATE QUESTIONS #####################################
+    ################################ DATE QUESTIONS ##############################
+    # Unchanged from template.
 
     async def _run_forecast_on_date(
         self, question: DateQuestion, research: str
@@ -435,7 +423,7 @@ class SpringTemplateBot2026(ForecastBot):
 
             Formatting Instructions:
             - This is a date question, and as such, the answer must be expressed in terms of dates.
-            - The dates must be written in the format of YYYY-MM-DD. If hours matter, please append the date with the hour in UTC and military time: YYYY-MM-DDTHH:MM:SSZ.No other formatting is allowed.
+            - The dates must be written in the format of YYYY-MM-DD. If hours matter, please append the date with the hour in UTC and military time: YYYY-MM-DDTHH:MM:SSZ. No other formatting is allowed.
             - Always start with a lower date chronologically and then increase from there.
             - Do NOT forget this. The dates must be written in chronological order starting at the earliest time at percentile 10 and increasing from there.
 
@@ -448,6 +436,7 @@ class SpringTemplateBot2026(ForecastBot):
             (f) A brief description of an unexpected scenario that results in a high outcome.
 
             {self._get_conditional_disclaimer_if_necessary(question)}
+
             You remind yourself that good forecasters are humble and set wide 90/10 confidence intervals to account for unknown unknowns.
 
             The last thing you write is your final answer as:
@@ -461,8 +450,7 @@ class SpringTemplateBot2026(ForecastBot):
             "
             """
         )
-        forecast = await self._date_prompt_to_forecast(question, prompt)
-        return forecast
+        return await self._date_prompt_to_forecast(question, prompt)
 
     async def _date_prompt_to_forecast(
         self,
@@ -487,7 +475,6 @@ class SpringTemplateBot2026(ForecastBot):
             additional_instructions=parsing_instructions,
             num_validation_samples=self._structure_output_validation_samples,
         )
-
         percentile_list = [
             Percentile(
                 percentile=percentile.percentile,
@@ -525,14 +512,14 @@ class SpringTemplateBot2026(ForecastBot):
             upper_bound_message = f"The question creator thinks the number is likely not higher than {upper_bound_number} {unit_of_measure}."
         else:
             upper_bound_message = f"The outcome can not be higher than {upper_bound_number} {unit_of_measure}."
-
         if question.open_lower_bound:
             lower_bound_message = f"The question creator thinks the number is likely not lower than {lower_bound_number} {unit_of_measure}."
         else:
             lower_bound_message = f"The outcome can not be lower than {lower_bound_number} {unit_of_measure}."
         return upper_bound_message, lower_bound_message
 
-    ##################################### CONDITIONAL QUESTIONS #####################################
+    ############################ CONDITIONAL QUESTIONS ###########################
+    # Unchanged from template.
 
     async def _run_forecast_on_conditional(
         self, question: ConditionalQuestion, research: str
@@ -553,13 +540,16 @@ class SpringTemplateBot2026(ForecastBot):
             f"""
             ## Parent Question Reasoning
             {parent_info.reasoning}
+
             ## Child Question Reasoning
             {child_info.reasoning}
+
             ## Yes Question Reasoning
             {yes_info.reasoning}
+
             ## No Question Reasoning
             {no_info.reasoning}
-        """
+            """
         )
         full_prediction = ConditionalPrediction(
             parent=parent_info.prediction_value,  # type: ignore
@@ -582,7 +572,6 @@ class SpringTemplateBot2026(ForecastBot):
             and previous_forecasts
             and question_type not in self.force_reforecast_in_conditional
         ):
-            # TODO: add option to not affirm current parent/child forecasts, create new forecast
             previous_forecast = previous_forecasts[-1]
             current_utc_time = datetime.now(timezone.utc)
             if (
@@ -615,10 +604,12 @@ class SpringTemplateBot2026(ForecastBot):
             ## {question_type} Question Information
             You have previously forecasted the {question_type} Question to the value: {DataOrganizer.get_readable_prediction(reasoning.prediction_value)}
             This is relevant information for your current forecast, but it is NOT your current forecast, but previous forecasting information that is relevant to your current forecast.
+
             The reasoning for the {question_type} Question was as such:
             ```
             {reasoning.reasoning}
             ```
+
             This is absolutely essential: do NOT use this reasoning to re-forecast the {question_type} question.
             """
         )
@@ -641,14 +632,13 @@ if __name__ == "__main__":
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-
     # Suppress LiteLLM logging
     litellm_logger = logging.getLogger("LiteLLM")
     litellm_logger.setLevel(logging.WARNING)
     litellm_logger.propagate = False
 
     parser = argparse.ArgumentParser(
-        description="Run the TemplateBot forecasting system"
+        description="Run the HumanAIOS forecasting bot"
     )
     parser.add_argument(
         "--mode",
@@ -665,7 +655,7 @@ if __name__ == "__main__":
         "test_questions",
     ], "Invalid run mode"
 
-    template_bot = SpringTemplateBot2026(
+    humanaios_bot = HumanAIOSBot(
         research_reports_per_question=1,
         predictions_per_research_report=5,
         use_research_summary_to_forecast=False,
@@ -673,56 +663,60 @@ if __name__ == "__main__":
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={  # choose your model names or GeneralLlm llms here, otherwise defaults will be chosen for you
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o", # "anthropic/claude-sonnet-4-20250514", etc (see docs for litellm)
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        llms={
+            # Claude Sonnet 4.5 as primary reasoning model.
+            # If you want a newer Sonnet, update the model string here.
+            # litellm model naming: "anthropic/<model-id>"
+            "default": GeneralLlm(
+                model="anthropic/claude-sonnet-4-5",
+                temperature=0.3,
+                timeout=60,
+                allowed_tries=2,
+            ),
+            # Cheap, fast model for structured-output parsing.
+            "parser": "openai/gpt-4o-mini",
+            # Research: AskNews if credentials present, else fall back to default.
+            # The tournament gives free AskNews credits — see deploy steps.
+            "researcher": "asknews/news-summaries",
+            "summarizer": "openai/gpt-4o-mini",
+        },
     )
 
     client = MetaculusClient()
+
     if run_mode == "tournament":
-        # You may want to change this to the specific tournament ID you want to forecast on
         seasonal_tournament_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
+            humanaios_bot.forecast_on_tournament(
                 client.CURRENT_AI_COMPETITION_ID, return_exceptions=True
             )
         )
         minibench_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
+            humanaios_bot.forecast_on_tournament(
                 client.CURRENT_MINIBENCH_ID, return_exceptions=True
             )
         )
         forecast_reports = seasonal_tournament_reports + minibench_reports
     elif run_mode == "metaculus_cup":
-        # The Metaculus cup is a good way to test the bot's performance on regularly open questions. You can also use AXC_2025_TOURNAMENT_ID = 32564 or AI_2027_TOURNAMENT_ID = "ai-2027"
-        # The Metaculus cup may not be initialized near the beginning of a season (i.e. January, May, September)
-        template_bot.skip_previously_forecasted_questions = False
+        humanaios_bot.skip_previously_forecasted_questions = False
         forecast_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
+            humanaios_bot.forecast_on_tournament(
                 client.CURRENT_METACULUS_CUP_ID, return_exceptions=True
             )
         )
     elif run_mode == "test_questions":
-        # Example questions are a good way to test the bot's performance on a single question
         EXAMPLE_QUESTIONS = [
-            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",  # Human Extinction - Binary
-            "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",  # Age of Oldest Human - Numeric
-            "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",  # Number of New Leading AI Labs - Multiple Choice
-            "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",  # Number of US Labor Strikes Due to AI in 2029 - Discrete
+            "https://www.metaculus.com/questions/578/human-extinction-by-2100/",
+            "https://www.metaculus.com/questions/14333/age-of-oldest-human-as-of-2100/",
+            "https://www.metaculus.com/questions/22427/number-of-new-leading-ai-labs/",
+            "https://www.metaculus.com/c/diffusion-community/38880/how-many-us-labor-strikes-due-to-ai-in-2029/",
         ]
-        template_bot.skip_previously_forecasted_questions = False
+        humanaios_bot.skip_previously_forecasted_questions = False
         questions = [
             client.get_question_by_url(question_url)
             for question_url in EXAMPLE_QUESTIONS
         ]
         forecast_reports = asyncio.run(
-            template_bot.forecast_questions(questions, return_exceptions=True)
+            humanaios_bot.forecast_questions(questions, return_exceptions=True)
         )
-    template_bot.log_report_summary(forecast_reports)
+
+    humanaios_bot.log_report_summary(forecast_reports)
