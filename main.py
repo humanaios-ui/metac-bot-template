@@ -677,7 +677,12 @@ if __name__ == "__main__":
             "parser": "openai/gpt-4o-mini",
             # Research: AskNews if credentials present, else fall back to default.
             # The tournament gives free AskNews credits — see deploy steps.
-            "researcher": "asknews/news-summaries",
+                        "researcher": GeneralLlm(
+                model="anthropic/claude-sonnet-4-5",
+                temperature=0.3,
+                timeout=60,
+                allowed_tries=2,
+          ),
             "summarizer": "openai/gpt-4o-mini",
         },
     )
